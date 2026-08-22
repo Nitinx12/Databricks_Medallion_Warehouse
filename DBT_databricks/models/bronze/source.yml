@@ -1,0 +1,14 @@
+version: 2
+sources:
+  - name: bronze
+    database: datawarehouse
+    schema: bronze
+    description: "This Source contain raw data from the mongo and postgres loaded by scripts/bronze_pipeline.py"
+
+    tables:
+      - name: cust_info
+      - name: prd_info
+      - name: sales_details
+      - name: CUST_AZ12
+      - name: LOC_A101
+      - name: PX_CAT_G1V2

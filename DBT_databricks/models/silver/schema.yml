@@ -1,0 +1,56 @@
+version: 2
+
+models:
+  - name: cust_info
+    description: >
+      Deduplicated, type-cleaned cust_info records from bronze.customers.
+      One row per cst_id, latest version wins based on updated_at.
+    columns:
+      - name: cst_id
+        description: Unique identifier for the customer, sourced from bronze.cust_info.
+        tests:
+          - unique
+          - not_null
+
+      - name: cst_key
+        description: Business/natural key for the customer.
+        tests:
+          - unique
+          - not_null
+
+      - name: cst_first_name
+        description: Customer's first name, trimmed.
+        tests:
+          - not_null
+
+      - name: cst_last_name
+        description: Customer's last name, trimmed.
+        tests:
+          - not_null
+
+      - name: cst_marital_status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['Single', 'Married', 'N/A']
+      
+      - name: cst_gndr
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['Female', 'Male', 'N/A']
+        
+      - name: cst_create_date
+        description: Date the customer record was originally created in the source system.
+        tests:
+          - not_null
+
+      - name: updated_at
+        description: Timestamp the source record was last updated; drives incremental filtering.
+        tests:
+          - not_null
+
+      - name: silver_loaded_at
+        description: Timestamp this row was processed into the silver layer.
+        tests:
+          - not_null
