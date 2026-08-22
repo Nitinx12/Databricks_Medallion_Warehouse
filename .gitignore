@@ -80,7 +80,6 @@ data/processed/
 data/staging/
 
 # Database dumps / backups
-*.sql
 *.dump
 *.backup
 *.bak
