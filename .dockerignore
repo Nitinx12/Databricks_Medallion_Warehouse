@@ -1,0 +1,87 @@
+# =========================
+# Git
+# =========================
+.git/
+.gitignore
+
+
+# =========================
+# Environment / Secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+.venv/
+venv/
+env/
+
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+
+# =========================
+# IDE / Editors
+# =========================
+.vscode/
+.idea/
+
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+
+
+# =========================
+# Local Data
+# =========================
+data/raw/
+data/processed/
+data/staging/
+
+tmp/
+temp/
+
+
+# =========================
+# Database Dumps / Backups
+# =========================
+*.sql
+*.dump
+*.backup
+*.bak
+
+
+# =========================
+# Airflow
+# =========================
+airflow.db
+airflow-webserver.pid
+airflow/logs/
+
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+
+# =========================
+# OS Files
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,28 @@
+[project]
+name = "datawarehouse"
+version = "0.1.0"
+description = "ETL Data Warehouse Project"
+readme = "README.md"
+authors = [
+    { name = "Nitin", email = "nitin321x@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "databricks>=0.2",
+    "databricks-sql-connector>=4.4.0",
+    "dotenv>=0.9.9",
+    "duckdb>=1.5.5",
+    "matplotlib>=3.11.1",
+    "pandas",
+    "psycopg2>=2.9.12",
+    "psycopg2-binary",
+    "pyarrow>=25.0.1",
+    "pymongo>=4.17.0",
+    "pyspark>=4.2.0",
+    "rich>=15.0.0",
+    "seaborn>=0.13.2",
+    "sqlalchemy>=2.0.52",
+]
+
+[tool.uv]
+package = false

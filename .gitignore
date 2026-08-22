@@ -1,0 +1,113 @@
+# =========================
+# Environment Variables
+# =========================
+.env
+.env.*
+!.env.example
+
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Type checking
+.mypy_cache/
+.pyre/
+.pytype/
+
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+
+# =========================
+# IDE / Editors
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+
+# =========================
+# OS Files
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+
+# =========================
+# ETL Pipeline Files
+# =========================
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+tmp/
+temp/
+
+# Local data files
+data/raw/
+data/processed/
+data/staging/
+
+# Database dumps / backups
+*.sql
+*.dump
+*.backup
+*.bak
+
+
+# =========================
+# Docker
+# =========================
+docker-compose.override.yml
+
+
+# =========================
+# Airflow
+# =========================
+airflow.cfg
+airflow.db
+airflow-webserver.pid
+
+# Airflow logs
+airflow/logs/
+
+
+# =========================
+# Databricks
+# =========================
+.databricks/
+databricks-connect/
+
+
+__init__.py
