@@ -10,6 +10,7 @@ requires-python = ">=3.13"
 dependencies = [
     "databricks>=0.2",
     "databricks-sql-connector>=4.4.0",
+    "dbt-databricks>=1.12.4",
     "dotenv>=0.9.9",
     "duckdb>=1.5.5",
     "matplotlib>=3.11.1",
@@ -18,9 +19,10 @@ dependencies = [
     "psycopg2-binary",
     "pyarrow>=25.0.1",
     "pymongo>=4.17.0",
-    "pyspark>=4.2.0",
+    "pyspark>=3.5,<4.0",
     "rich>=15.0.0",
     "seaborn>=0.13.2",
+    "setuptools>=84.0.0",
     "sqlalchemy>=2.0.52",
 ]
 
