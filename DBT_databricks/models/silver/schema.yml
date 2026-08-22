@@ -3,7 +3,7 @@ version: 2
 models:
   - name: cust_info
     description: >
-      Deduplicated, type-cleaned cust_info records from bronze.customers.
+      Deduplicated, type-cleaned cust_info records from bronze.cust_info.
       One row per cst_id, latest version wins based on updated_at.
     columns:
       - name: cst_id
@@ -29,19 +29,74 @@ models:
           - not_null
 
       - name: cst_marital_status
+        description: Standardized marital status ('Single', 'Married', or 'N/A').
         tests:
           - accepted_values:
               arguments:
                 values: ['Single', 'Married', 'N/A']
-      
+
       - name: cst_gndr
+        description: Standardized gender ('Female', 'Male', or 'N/A').
         tests:
           - accepted_values:
               arguments:
                 values: ['Female', 'Male', 'N/A']
-        
+
       - name: cst_create_date
         description: Date the customer record was originally created in the source system.
+        tests:
+          - not_null
+
+      - name: updated_at
+        description: Timestamp the source record was last updated; drives incremental filtering.
+        tests:
+          - not_null
+
+      - name: silver_loaded_at
+        description: Timestamp this row was processed into the silver layer.
+        tests:
+          - not_null
+
+  - name: prd_info
+    description: >
+      Deduplicated, type-cleaned prd_info records from bronze.prd_info.
+      One row per prd_id; prd_end_dt derived from the next record's start date.
+    columns:
+      - name: prd_id
+        description: Unique identifier for the product, sourced from bronze.prd_info.
+        tests:
+          - unique
+          - not_null
+
+      - name: cat_id
+        description: Category ID extracted from the first 5 characters of prd_key.
+        tests:
+          - not_null
+
+      - name: prd_key
+        description: Product business key, extracted from prd_key after position 6.
+        tests:
+          - not_null
+
+      - name: prd_nm
+        description: Product name, trimmed.
+        tests:
+          - not_null
+
+      - name: prd_cost
+        description: Product cost; nulls coalesced to 0.
+        tests:
+          - not_null
+
+      - name: prd_line
+        description: Standardized product line ('Mountain', 'Road', 'Other Sales', 'Touring', or 'N/A').
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['Mountain', 'Road', 'Other Sales', 'Touring', 'N/A']
+
+      - name: prd_start_dt
+        description: Product validity start date.
         tests:
           - not_null
 

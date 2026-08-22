@@ -62,13 +62,13 @@ cleaned AS (
     WHERE rnk = 1
 )
 SELECT
-    cst_id :: STRING                   AS cst_id,
-    cst_key :: STRING                  AS cst_key,
-    cst_first_name :: STRING           AS cst_first_name,
-    cst_last_name :: STRING            AS cst_last_name,
-    cst_marital_status :: STRING       AS cst_marital_status,
-    cst_gndr :: STRING                 AS cst_gndr,
-    cst_create_date                    AS cst_create_date,
-    updated_at                         AS updated_at,
-    CURRENT_TIMESTAMP                  AS silver_loaded_at
+    cst_id :: STRING                    AS cst_id,
+    cst_key :: STRING                   AS cst_key,
+    cst_first_name :: STRING            AS cst_first_name,
+    cst_last_name :: STRING             AS cst_last_name,
+    cst_marital_status :: STRING        AS cst_marital_status,
+    cst_gndr :: STRING                  AS cst_gndr,
+    cst_create_date                     AS cst_create_date,
+    updated_at                          AS updated_at,
+    CURRENT_TIMESTAMP                   AS silver_loaded_at
 FROM cleaned
