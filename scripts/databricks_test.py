@@ -1,101 +1,49 @@
-#!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.9"
-# dependencies = [
-#     "databricks-sql-connector",
-#     "rich",
-#     "pymongo",      # pulled in because connection.py also defines Mongo/Postgres helpers
-#     "sqlalchemy",   # same reason - imported at module load even though unused here
-#     "python-dotenv", # engine.py (imported via connection.py) does a hard `from dotenv import ...`
-# ]
-# ///
-# NOTE: engine.py (imported by connection.py) may need further third-party
-# deps beyond python-dotenv, depending on how it's implemented - if you hit
-# more ModuleNotFoundErrors from inside engine.py, add them here too.
 """
 databricks_tests.py
 
-Runs the data-quality SQL scripts in tests/bronze, tests/silver, tests/gold
-against Databricks and prints a rich report.
+Runs data-quality SQL tests for the bronze, silver, and gold layers in
+Databricks and generates a Rich console report.
 
-Expected layout (default --tests-dir is the "tests" folder at the project
-root, a sibling of the scripts/ folder this file lives in and the utils/
-folder holding connection.py/logger.py/engine.py):
+Test convention:
+    - 0 rows returned -> PASS
+    - Rows returned   -> FAIL
+    - Query exception -> ERROR
 
-    <project_root>/
-        scripts/
-            databricks_test.py
-        utils/
-            connection.py
-            logger.py
-            engine.py
-        tests/
-            bronze/
-                03_future_date_check.sql
-            silver/
-                04_silver_null_check.sql
-                05_silver_future_date_check.sql
-                ...
-            gold/
-                14_gold_unmatched_dimension_key_check.sql
-                ...
+The script supports compound SQL statements, although the Databricks SQL
+connector may only expose the final result set when multiple SELECT
+statements are produced.
 
-    Pass --tests-dir explicitly if your tests/ folder lives somewhere else.
+Features:
+    - Run all layers or selected layers
+    - Dry-run mode
+    - JSON test report
+    - Fail-fast option
+    - Automatic Databricks connection and project logging
 
-Every script here is written so it returns EMPTY when the check passes and
-returns rows only when it finds a problem (see the SKILL note at the top of
-each .sql file). That convention is what this runner relies on:
+Expected project structure:
 
-    - no result set / zero rows  -> PASS
-    - one or more rows returned  -> FAIL  (rows are printed as the evidence)
-    - the query raised           -> ERROR (connectivity, syntax, missing table, etc)
+    project_root/
+    ├── scripts/
+    │   └── databricks_tests.py
+    ├── utils/
+    │   ├── connection.py
+    │   ├── logger.py
+    │   └── engine.py
+    └── tests/
+        ├── bronze/
+        ├── silver/
+        └── gold/
 
-IMPORTANT CAVEAT: several of these scripts are BEGIN...END compound
-statements with a FOR loop that can emit MORE THAN ONE SELECT (one per
-failing table/column). The Databricks SQL connector's cursor only exposes
-the FINAL result set of a compound statement through fetchall() - so if a
-script has multiple simultaneous failures, this runner will only show you
-the last one. It will still correctly report FAIL either way. If you want
-every failure visible over the API, the fix is to change the .sql scripts
-to accumulate failures into a scratch Delta table and do one final SELECT
-at the end, instead of emitting a SELECT per loop iteration - happy to
-convert them if this bites you.
+Usage:
+    uv run databricks_tests.py
+    uv run databricks_tests.py --layer silver gold
+    uv run databricks_tests.py --dry-run
+    uv run databricks_tests.py --json-report out.json
+    uv run databricks_tests.py --fail-fast
 
-Setup
------
-    This file carries inline PEP 723 metadata (the "# /// script" block up
-    top), so `uv run` provisions databricks-sql-connector and rich into an
-    ephemeral env automatically -- no venv, no requirements.txt, no `uv add`
-    needed. Just `uv run databricks_tests.py`.
+Exit code 0 means all tests passed.
 
-    If you'd rather add it to an existing uv project instead:
-        uv add databricks-sql-connector rich
-        uv run python databricks_tests.py
-
-Connection & logging
----------------------
-    Databricks connectivity is delegated to connection.get_databricks_connection(),
-    which reads its host/http-path/token from engine.py (env-var backed).
-    connection.py, logger.py, and engine.py are expected in a utils/ folder
-    at the project root (i.e. <project_root>/utils/, with this script under
-    <project_root>/scripts/ or similar) - this script adds that utils/ folder
-    to sys.path itself, so no PYTHONPATH setup is needed. Whatever env vars
-    engine.py requires must still be set (e.g. via a .env file, since
-    python-dotenv is loaded above).
-
-    Every run is also logged through logger.get_logger(stage="transformation"),
-    which writes to logs/transformation/ in addition to the console report
-    below.
-
-Usage
------
-    uv run databricks_tests.py                       # run everything
-    uv run databricks_tests.py --layer silver gold    # only these layers
-    uv run databricks_tests.py --dry-run              # no DB call, just list what would run
-    uv run databricks_tests.py --json-report out.json # also dump machine-readable results
-    uv run databricks_tests.py --fail-fast            # stop at first FAIL/ERROR
-
-Exit code is 0 only if every test PASSed - safe to use as a CI/job gate.
+Author: Nitin
 """
 
 from __future__ import annotations
