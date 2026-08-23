@@ -1,9 +1,6 @@
--- Loops every STRING column in silver and flags empty-string values.
--- These usually should have been mapped to 'N/A' or NULL by the model's
--- CASE logic -- an empty string slipping through means a code path wasn't
--- covered. Uses LENGTH() = 0 rather than comparing to a literal '' to
--- avoid quote-escaping issues inside the dynamically built SQL string.
--- Returns empty when clean.
+-- Checks STRING columns in silver for empty values.
+-- Empty strings should be converted to 'N/A' or NULL by model logic.
+-- Uses LENGTH() = 0. Returns empty when clean.
 
 BEGIN
 
