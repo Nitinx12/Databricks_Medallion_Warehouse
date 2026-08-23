@@ -1,7 +1,5 @@
--- Dynamically checks every silver column for NULLs, except columns that are
--- intentionally nullable by design (derived end dates, optional order dates,
--- unparsed birth dates, maintenance flag). Add to the exclusion list as new
--- intentionally-nullable columns are introduced. Returns empty when clean.
+-- Checks silver-layer columns for unexpected NULLs.
+-- Intentionally nullable columns are excluded. Returns empty when clean.
 
 BEGIN
 
