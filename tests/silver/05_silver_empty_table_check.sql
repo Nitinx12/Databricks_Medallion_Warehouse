@@ -1,6 +1,5 @@
--- Loops every base table in silver and flags any with zero rows. Catches
--- an incremental merge that accidentally wiped a table, or a full-refresh
--- that ran against an empty source. Returns empty when clean.
+-- Checks every silver base table for zero rows.
+-- Detects accidental wipes or empty full-refresh loads. Returns empty when clean.
 
 BEGIN
 
