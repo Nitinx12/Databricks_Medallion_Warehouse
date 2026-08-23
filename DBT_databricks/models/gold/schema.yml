@@ -1,0 +1,210 @@
+version: 2
+
+models:
+  - name: dim_customers
+    description: >
+      Customer dimension combining cust_info, cust_az12, and loc_a101 into
+      one row per customer. cst_gndr takes priority over cust_az12.gen when
+      both are populated. customer_key is a stable hash of customer_id, not
+      a sequential surrogate key, so it stays consistent across incremental
+      runs.
+    columns:
+      - name: customer_key
+        description: Stable hash based surrogate key derived from customer_id. Referenced by fct_sales.
+        tests:
+          - unique
+          - not_null
+
+      - name: customer_id
+        description: Natural key for the customer, sourced from cust_info.cst_id. Drives the incremental merge key.
+        tests:
+          - unique
+          - not_null
+
+      - name: customer_number
+        description: Business key for the customer, sourced from cust_info.cst_key.
+        tests:
+          - unique
+          - not_null
+
+      - name: customer_name
+        description: Customer's full name, concatenated from first and last name.
+        tests:
+          - not_null
+
+      - name: country
+        description: >
+          Customer's country, sourced from loc_a101.cntry. Null when there
+          is no matching location record for the customer.
+
+      - name: marital_status
+        description: Standardized marital status ('Single', 'Married', or 'N/A').
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['Single', 'Married', 'N/A']
+
+      - name: gender
+        description: >
+          Standardized gender. Sourced from cust_info.cst_gndr when
+          populated, otherwise falls back to cust_az12.gen.
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['Female', 'Male', 'N/A']
+
+      - name: birthdate
+        description: Customer birth date, sourced from cust_az12.bdate.
+
+      - name: create_date
+        description: Date the customer record was originally created in the source system.
+        tests:
+          - not_null
+
+      - name: updated_at
+        description: >
+          Latest updated_at across cust_info, cust_az12, and loc_a101 for
+          this customer; drives incremental filtering.
+        tests:
+          - not_null
+
+      - name: gold_loaded_at
+        description: Timestamp this row was processed into the gold layer.
+        tests:
+          - not_null
+
+  - name: dim_products
+    description: >
+      Product dimension combining the current version of each prd_info
+      product (prd_end_dt IS NULL) with px_cat_g1v2 category reference
+      data. product_key is a stable hash of product_id, not a sequential
+      surrogate key, so it stays consistent across incremental runs.
+    columns:
+      - name: product_key
+        description: Stable hash based surrogate key derived from product_id. Referenced by fct_sales.
+        tests:
+          - unique
+          - not_null
+
+      - name: product_id
+        description: Natural key for the product, sourced from prd_info.prd_id. Drives the incremental merge key.
+        tests:
+          - unique
+          - not_null
+
+      - name: product_number
+        description: Product business key, sourced from prd_info.prd_key. Joined to by fct_sales.
+        tests:
+          - unique
+          - not_null
+
+      - name: product_name
+        description: Product name.
+        tests:
+          - not_null
+
+      - name: category_id
+        description: Category ID, sourced from prd_info.cat_id.
+
+      - name: category
+        description: >
+          Category name, sourced from px_cat_g1v2.cat. Null when there is
+          no matching category record (see the known CO_PE gap on
+          prd_info.cat_id).
+
+      - name: subcategory
+        description: Subcategory name, sourced from prd_info.subcat.
+
+      - name: maintenance
+        description: Maintenance flag for the category, sourced from px_cat_g1v2.maintenance.
+
+      - name: cost
+        description: Product cost.
+        tests:
+          - not_null
+
+      - name: product_line
+        description: Standardized product line ('Mountain', 'Road', 'Other Sales', 'Touring', or 'N/A').
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['Mountain', 'Road', 'Other Sales', 'Touring', 'N/A']
+
+      - name: start_date
+        description: Product validity start date, sourced from prd_info.prd_start_dt.
+        tests:
+          - not_null
+
+      - name: updated_at
+        description: >
+          Latest updated_at across prd_info and px_cat_g1v2 for this
+          product; drives incremental filtering.
+        tests:
+          - not_null
+
+      - name: gold_loaded_at
+        description: Timestamp this row was processed into the gold layer.
+        tests:
+          - not_null
+
+  - name: fct_sales
+    description: >
+      Sales fact table at the order number plus product number grain,
+      joined out to dim_products and dim_customers for surrogate keys.
+    columns:
+      - name: order_number
+        description: Sales order number, sourced from sales_details.sls_ord_num.
+        tests:
+          - not_null
+
+      - name: product_key
+        description: >
+          Surrogate key joined from dim_products via product_number. Null
+          when the order's product number has no match in dim_products.
+        tests:
+          - not_null:
+              config:
+                severity: warn
+
+      - name: customer_key
+        description: >
+          Surrogate key joined from dim_customers via customer_id. Null
+          when the order's customer id has no match in dim_customers.
+        tests:
+          - not_null:
+              config:
+                severity: warn
+
+      - name: order_date
+        description: Order date, sourced from sales_details.sls_order_dt.
+
+      - name: shipping_date
+        description: Shipping date, sourced from sales_details.sls_ship_dt.
+
+      - name: due_date
+        description: Due date, sourced from sales_details.sls_due_dt.
+
+      - name: sales_amount
+        description: Total sales amount for the line item.
+        tests:
+          - not_null
+
+      - name: quantity
+        description: Quantity of product sold on the line item.
+        tests:
+          - not_null
+
+      - name: price
+        description: Unit price for the line item.
+        tests:
+          - not_null
+
+      - name: updated_at
+        description: Timestamp the source sales_details record was last updated; drives incremental filtering.
+        tests:
+          - not_null
+
+      - name: gold_loaded_at
+        description: Timestamp this row was processed into the gold layer.
+        tests:
+          - not_null
