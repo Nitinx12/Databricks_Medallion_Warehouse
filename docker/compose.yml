@@ -1,0 +1,104 @@
+# docker/compose.yml
+#
+# Chains the bronze -> silver -> gold pipeline as one-shot services using
+# `condition: service_completed_successfully`, so each stage only starts
+# after the previous one has exited 0 - the same fail-fast ordering as
+# pipeline/run_pipeline.ps1, expressed as native Compose dependencies.
+#
+# Run from the docker/ folder:
+#
+#   docker compose build                     # build the image once
+#   docker compose up                        # run every stage, in order
+#   docker compose run --rm bronze           # run just one stage ad hoc
+#   docker compose --profile manual run --rm pipeline full
+#                                             # everything in a single container
+#
+# Requires a .env file at the project root (../.env relative to this file)
+# with whatever utils/connection.py and utils/engine.py expect - e.g.
+# POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DATABASE, POSTGRES_USERNAME,
+# POSTGRES_PASSWORD, MONGO_URL, MONGO_DB, DATABRICKS_CATALOG,
+# DATABRICKS_SCHEMA_BRONZE, plus your Databricks SQL warehouse credentials
+# (server hostname / HTTP path / token) and dbt profile target. Adjust the
+# env_file path below if your .env lives somewhere else.
+
+x-pipeline-image: &pipeline-image
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  image: data-pipeline:latest
+  env_file:
+    - ../.env
+  volumes:
+    - ../logs:/app/logs
+  restart: "no"
+
+services:
+  # ------------------------------------------------------------------ #
+  # All-in-one: bronze -> gold in a single container. Not part of the
+  # default `docker compose up` (see profiles below) so it doesn't run
+  # redundantly alongside the per-stage chain.
+  # ------------------------------------------------------------------ #
+  pipeline:
+    <<: *pipeline-image
+    container_name: pipeline_full
+    command: ["full"]
+    profiles: ["manual"]
+
+  # ------------------------------------------------------------------ #
+  # Per-stage services, chained bronze -> silver build -> silver dbt
+  # tests -> silver SQL tests -> gold build -> gold dbt tests -> gold
+  # SQL tests. `docker compose up` runs them in this order and stops the
+  # chain at the first non-zero exit.
+  # ------------------------------------------------------------------ #
+  bronze:
+    <<: *pipeline-image
+    container_name: pipeline_bronze
+    command: ["bronze", "${BRONZE_SOURCE:-both}"]
+
+  silver-build:
+    <<: *pipeline-image
+    container_name: pipeline_silver_build
+    command: ["dbt-run", "silver"]
+    depends_on:
+      bronze:
+        condition: service_completed_successfully
+
+  silver-test:
+    <<: *pipeline-image
+    container_name: pipeline_silver_test
+    command: ["dbt-test", "silver"]
+    depends_on:
+      silver-build:
+        condition: service_completed_successfully
+
+  silver-sql-tests:
+    <<: *pipeline-image
+    container_name: pipeline_silver_sql_tests
+    command: ["sql-test", "silver"]
+    depends_on:
+      silver-test:
+        condition: service_completed_successfully
+
+  gold-build:
+    <<: *pipeline-image
+    container_name: pipeline_gold_build
+    command: ["dbt-run", "gold"]
+    depends_on:
+      silver-sql-tests:
+        condition: service_completed_successfully
+
+  gold-test:
+    <<: *pipeline-image
+    container_name: pipeline_gold_test
+    command: ["dbt-test", "gold"]
+    depends_on:
+      gold-build:
+        condition: service_completed_successfully
+
+  gold-sql-tests:
+    <<: *pipeline-image
+    container_name: pipeline_gold_sql_tests
+    command: ["sql-test", "gold"]
+    depends_on:
+      gold-test:
+        condition: service_completed_successfully

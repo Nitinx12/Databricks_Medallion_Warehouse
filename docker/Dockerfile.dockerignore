@@ -1,0 +1,29 @@
+# Named Dockerfile.dockerignore (not .dockerignore) on purpose: BuildKit
+# auto-discovers a "<dockerfile-name>.dockerignore" file living next to the
+# Dockerfile itself (docker/Dockerfile -> docker/Dockerfile.dockerignore),
+# so this works without needing to live at the build context root. Requires
+# BuildKit, which is the default in current Docker/Compose versions. If
+# you're on a very old Docker without BuildKit, copy this to
+# <project_root>/.dockerignore instead.
+
+.git
+.gitignore
+.github
+
+**/__pycache__
+**/*.pyc
+.venv
+.env
+.env.*
+
+# dbt
+target/
+dbt_packages/
+logs/
+
+# editors / OS
+.vscode
+.idea
+.DS_Store
+
+docker/compose.yml
