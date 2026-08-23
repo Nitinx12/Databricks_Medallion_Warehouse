@@ -13,7 +13,7 @@ BEGIN
         SELECT * FROM (VALUES
             ('dim_customers', 'customer_id'),
             ('dim_products',  'product_id'),
-            ('fct_sales',     'order_number, product_number')
+            ('fct_sales',     'order_number, product_key')
         ) AS t(table_name, key_columns)
     DO
 

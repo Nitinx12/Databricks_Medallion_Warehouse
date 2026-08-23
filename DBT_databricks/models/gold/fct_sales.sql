@@ -2,7 +2,7 @@
     materialized = 'incremental',
     file_format = 'delta',
     incremental_strategy = 'merge',
-    unique_key = ['order_number', 'product_number'],
+    unique_key = ['order_number', 'product_key'],
     on_schema_change = 'sync_all_columns'
 )
 }}
