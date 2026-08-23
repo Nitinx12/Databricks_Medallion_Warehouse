@@ -1,8 +1,6 @@
--- Same intent as 03_future_date_check.sql, but scoped to silver instead of
--- bronze. Bronze future dates are expected and get cleaned (e.g. cust_az12
--- nulls future bdate); silver future dates are NOT expected -- if this
--- returns rows, the cleaning logic in the model regressed. Returns empty
--- when clean.
+-- Checks for unexpected future dates in the silver layer.
+-- Bronze future dates may be cleaned during transformation; silver future dates
+-- indicate a regression in cleaning logic. Returns empty when clean.
 
 BEGIN
 
