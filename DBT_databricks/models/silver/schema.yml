@@ -72,6 +72,10 @@ models:
         description: Category ID extracted from the first 5 characters of prd_key.
         tests:
           - not_null
+          - no_orphan_rows:
+              arguments:
+                to: ref('px_cat_g1v2')
+                field: id
 
       - name: prd_key
         description: Product business key, extracted from prd_key after position 6.
@@ -99,6 +103,200 @@ models:
         description: Product validity start date.
         tests:
           - not_null
+
+      - name: updated_at
+        description: Timestamp the source record was last updated; drives incremental filtering.
+        tests:
+          - not_null
+
+      - name: silver_loaded_at
+        description: Timestamp this row was processed into the silver layer.
+        tests:
+          - not_null
+
+  - name: sales_details
+    description: >
+      Type-cleaned, business-rule-corrected sales_details records from bronze.sales_details.
+      One row per sls_ord_num + sls_prd_key; invalid dates nulled out, sls_sales/sls_price
+      recomputed from raw values where inconsistent or missing.
+    columns:
+      - name: sls_ord_num
+        description: Sales order number, sourced from bronze.sales_details.
+        tests:
+          - not_null
+
+      - name: sls_prd_key
+        description: Product business key for the line item; joins to prd_info.prd_key.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('prd_info')
+                field: prd_key
+
+      - name: sls_cust_id
+        description: >
+          Customer identifier for the order, sourced from bronze.sales_details.
+          Not currently validated against cust_info — the two systems use
+          different key formats/domains for customer identity.
+        tests:
+          - not_null
+
+      - name: sls_order_dt
+        description: >
+          Order date, parsed from an 8-digit yyyyMMdd integer; nulled when zero,
+          the wrong length, or unparseable.
+
+      - name: sls_ship_dt
+        description: >
+          Ship date, parsed from an 8-digit yyyyMMdd integer; nulled when zero,
+          the wrong length, or unparseable.
+
+      - name: sls_due_dt
+        description: >
+          Due date, parsed from an 8-digit yyyyMMdd integer; nulled when zero,
+          the wrong length, or unparseable.
+
+      - name: sls_quantity
+        description: Quantity of product sold on the line item.
+        tests:
+          - not_null
+
+      - name: sls_price
+        description: >
+          Unit price; recomputed as sls_sales / sls_quantity when the source
+          value is null or non-positive, otherwise the raw source value.
+        tests:
+          - not_null
+
+      - name: sls_sales
+        description: >
+          Total sales amount; recomputed as sls_quantity * ABS(sls_price) when
+          the source value is null, non-positive, or inconsistent with
+          quantity * price, otherwise the raw source value.
+        tests:
+          - not_null
+
+      - name: updated_at
+        description: Timestamp the source record was last updated; drives incremental filtering.
+        tests:
+          - not_null
+
+      - name: silver_loaded_at
+        description: Timestamp this row was processed into the silver layer.
+        tests:
+          - not_null
+
+  - name: cust_az12
+    description: >
+      Type cleaned cust_az12 records from bronze.CUST_AZ12. NAS prefix
+      stripped from cid, future dated birth dates nulled, gender values
+      standardized to Female, Male, or N/A.
+    columns:
+      - name: _id
+        description: Unique identifier for the record, sourced from bronze.CUST_AZ12. Drives the incremental merge key.
+        tests:
+          - unique
+          - not_null
+
+      - name: cid
+        description: Customer business key with the NAS prefix stripped, aligned to cust_info.cst_key.
+        tests:
+          - not_null
+          - no_orphan_rows:
+              arguments:
+                to: ref('cust_info')
+                field: cst_key
+
+      - name: bdate
+        description: Customer birth date as an ISO string; future dated source values nulled out.
+        tests:
+          - accepted_range:
+              arguments:
+                min_value: "'1900-01-01'"
+                max_value: "cast(current_date() as string)"
+
+      - name: gen
+        description: Standardized gender ('Female', 'Male', or 'N/A').
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['Female', 'Male', 'N/A']
+
+      - name: updated_at
+        description: Timestamp the source record was last updated; drives incremental filtering.
+        tests:
+          - not_null
+
+      - name: silver_loaded_at
+        description: Timestamp this row was processed into the silver layer.
+        tests:
+          - not_null
+
+  - name: loc_a101
+    description: >
+      Type cleaned loc_a101 records from bronze.LOC_A101. Dashes stripped
+      from cid, country codes standardized to full names.
+    columns:
+      - name: _id
+        description: Unique identifier for the record, sourced from bronze.LOC_A101. Drives the incremental merge key.
+        tests:
+          - unique
+          - not_null
+
+      - name: cid
+        description: Customer business key with dashes stripped, aligned to cust_info.cst_key.
+        tests:
+          - not_null
+          - no_orphan_rows:
+              arguments:
+                to: ref('cust_info')
+                field: cst_key
+
+      - name: cntry
+        description: Standardized country name; blank or null source values map to N/A.
+        tests:
+          - not_null
+
+      - name: updated_at
+        description: Timestamp the source record was last updated; drives incremental filtering.
+        tests:
+          - not_null
+
+      - name: silver_loaded_at
+        description: Timestamp this row was processed into the silver layer.
+        tests:
+          - not_null
+
+  - name: px_cat_g1v2
+    description: >
+      Type cleaned px_cat_g1v2 records from bronze.PX_CAT_G1V2, providing
+      category and subcategory reference data joined from prd_info.cat_id.
+    columns:
+      - name: _id
+        description: Unique identifier for the record, sourced from bronze.PX_CAT_G1V2. Drives the incremental merge key.
+        tests:
+          - unique
+          - not_null
+
+      - name: id
+        description: Category ID; joined to by prd_info.cat_id.
+        tests:
+          - unique
+          - not_null
+
+      - name: cat
+        description: Category name.
+        tests:
+          - not_null
+
+      - name: subcat
+        description: Subcategory name.
+        tests:
+          - not_null
+
+      - name: maintenance
+        description: Maintenance flag for the category, carried through as is from bronze.PX_CAT_G1V2.
 
       - name: updated_at
         description: Timestamp the source record was last updated; drives incremental filtering.
