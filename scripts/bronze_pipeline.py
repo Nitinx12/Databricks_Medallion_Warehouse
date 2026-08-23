@@ -1,12 +1,26 @@
-"""Incrementally copy PostgreSQL and MongoDB source tables into Databricks bronze.
+"""
+Append-only, incremental copy of PostgreSQL and MongoDB data into the
+Databricks bronze layer.
 
-The pipeline discovers source objects at run time. It creates one Delta table per
-source object in the configured bronze schema, with the same source-table name
-and source columns only. No audit columns and no staging tables are created.
+This is a "dump-and-load" ingestion engine: it discovers source tables and
+collections, pulls only rows/documents changed since the last watermark, and
+appends them straight into bronze Delta tables using the same source names
+and columns. It does not merge, update, deduplicate, or match against
+existing rows - it never inspects target row values, only the target's
+MAX(updated_at) watermark.
 
-An object must have an ``updated_at`` column/field and a stable key: a PostgreSQL
-primary key or MongoDB ``_id``. Rows at the current watermark are re-read using
-``>=`` so records with equal timestamps are not skipped.
+Each source must contain an `updated_at` field. No stable key (primary key /
+`_id`) is required here, because bronze never upserts.
+
+Watermarks use `>=` so rows with the same timestamp are not skipped; this can
+occasionally re-append a row unchanged since the last run. That's expected
+and safe: the silver dbt models read from these bronze tables and use
+`materialized='incremental'` + `incremental_strategy='merge'` on a
+unique_key to de-duplicate and upsert into silver. Bronze is intentionally
+allowed to contain duplicates - silver is where "one row per key" is
+enforced.
+
+Author: Nitin
 """
 
 import argparse
@@ -19,7 +33,6 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time
 from decimal import Decimal
-from itertools import combinations
 from pathlib import Path
 
 from pyspark.sql import SparkSession
@@ -46,12 +59,9 @@ from utils.engine import (  # noqa: E402
 from utils.logger import get_logger  # noqa: E402
 
 INCREMENTAL_COLUMN = "updated_at"
-CHUNK_SIZE = 10_000
-MAX_MERGE_PARAMETERS = 10_000  # Databricks Thrift server hard limit per parameterized query
+CHUNK_SIZE = 10_000  # rows per JDBC fetch and upper bound on rows per INSERT batch
+MAX_INSERT_PARAMETERS = 10_000  # Databricks Thrift server hard limit per parameterized query
 MAX_PARALLEL_TABLES = 4  # tune down/up based on your SQL warehouse's concurrent-query capacity
-POSTGRES_READ_PARTITIONS = 8
-POSTGRES_PARTITION_COLUMN = "__bronze_read_partition"
-MAX_INFERRED_KEY_COLUMNS = 3
 REQUIRED_PACKAGES = ["pyspark", "pymongo", "psycopg2", "databricks.sql", "rich", "sqlalchemy"]
 REQUIRED_JARS = {
     "PostgreSQL JDBC": "postgresql*.jar",
@@ -110,10 +120,19 @@ def build_spark_session(jar_paths: list[str]) -> SparkSession:
     # can mismatch the driver/worker Python version. Setting these before
     # the SparkSession is built, and overriding whatever _env supplied,
     # makes this work the same regardless of which environment is active.
+    #
+    # NOTE: this is a plain local/standalone SparkSession (JDBC + Mongo
+    # connector jars only) - it is NOT attached to the Databricks workspace's
+    # Unity Catalog. All writes to Databricks go through
+    # utils.connection.get_databricks_connection() (databricks-sql-connector
+    # over the SQL warehouse), not through this Spark session's writer. If
+    # you later move this to run via Databricks Connect / on a Databricks
+    # cluster, dataframe.write.saveAsTable(target) becomes an option and can
+    # replace insert_rows() below with a single native append.
     os.environ["PYSPARK_PYTHON"] = sys.executable
     os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
     builder = (
-        SparkSession.builder.appName("BronzeIncrementalCopy")
+        SparkSession.builder.appName("BronzeAppendOnlyCopy")
         .config("spark.jars", ",".join(jar_paths))
         .config("spark.mongodb.read.connection.uri", MONGO_URL)
         .config("spark.sql.session.timeZone", "UTC")
@@ -130,8 +149,12 @@ def build_spark_session(jar_paths: list[str]) -> SparkSession:
     return spark
 
 
-def discover_postgres() -> list[dict]:
-    """Discover user tables with updated_at and a stable replacement key."""
+def discover_postgres(engine) -> list[dict]:
+    """Discover user tables that have an updated_at column to watermark on.
+
+    No key discovery here - bronze is append-only, so there is nothing to
+    match rows against.
+    """
     table_sql = text("""
         SELECT table_schema, table_name
         FROM information_schema.columns
@@ -140,81 +163,26 @@ def discover_postgres() -> list[dict]:
         GROUP BY table_schema, table_name
         ORDER BY table_schema, table_name
     """)
-    key_sql = text("""
-        SELECT kcu.column_name
-        FROM information_schema.table_constraints AS tc
-        JOIN information_schema.key_column_usage AS kcu
-          ON tc.constraint_name = kcu.constraint_name
-         AND tc.table_schema = kcu.table_schema
-         AND tc.table_name = kcu.table_name
-        WHERE tc.constraint_type = 'PRIMARY KEY'
-          AND tc.table_schema = :table_schema
-          AND tc.table_name = :table_name
-        ORDER BY kcu.ordinal_position
-    """)
-    engine = get_postgres_engine()
-    try:
-        with engine.connect() as connection:
-            tables = connection.execute(table_sql, {"incremental_column": INCREMENTAL_COLUMN}).mappings().all()
-            discovered = []
-            for row in tables:
-                primary_key = list(connection.execute(key_sql, row).scalars())
-                if not primary_key:
-                    primary_key = infer_postgres_key(connection, row["table_schema"], row["table_name"])
-                if primary_key:
-                    discovered.append({"source": "postgres", "schema": row["table_schema"], "name": row["table_name"], "primary_key": primary_key})
-            return discovered
-    finally:
-        engine.dispose()
+    # PERF: engine is now created once in main() and passed in, instead of
+    # this function opening (and disposing) its own engine every call.
+    with engine.connect() as connection:
+        tables = connection.execute(table_sql, {"incremental_column": INCREMENTAL_COLUMN}).mappings().all()
+        return [
+            {"source": "postgres", "schema": row["table_schema"], "name": row["table_name"]}
+            for row in tables
+        ]
 
 
-def infer_postgres_key(connection, table_schema: str, table_name: str) -> list[str]:
-    """Find a non-null unique key when source DDL did not declare one.
-
-    This is intentionally capped at three columns. A table without a proven key
-    is excluded rather than risking updates being matched to the wrong rows.
-    """
-    columns_sql = text("""
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_schema = :table_schema AND table_name = :table_name
-          AND column_name <> :incremental_column
-        ORDER BY ordinal_position
-    """)
-    columns = list(connection.execute(columns_sql, {
-        "table_schema": table_schema,
-        "table_name": table_name,
-        "incremental_column": INCREMENTAL_COLUMN,
-    }).scalars())
-    source_table = postgres_qualified_name(table_schema, table_name)
-    for width in range(1, min(MAX_INFERRED_KEY_COLUMNS, len(columns)) + 1):
-        for candidate in combinations(columns, width):
-            selected = ", ".join(quote_postgres_identifier(column) for column in candidate)
-            null_predicate = " OR ".join(f"{quote_postgres_identifier(column)} IS NULL" for column in candidate)
-            profile_sql = text(
-                f"SELECT COUNT(*) AS row_count, "
-                f"COUNT(DISTINCT ({selected})) AS distinct_count, "
-                f"COUNT(*) FILTER (WHERE {null_predicate}) AS null_count "
-                f"FROM {source_table}"
-            )
-            row = connection.execute(profile_sql).mappings().one()
-            if row["row_count"] and row["null_count"] == 0 and row["row_count"] == row["distinct_count"]:
-                return list(candidate)
-    return []
-
-
-def discover_mongo() -> list[dict]:
+def discover_mongo(client) -> list[dict]:
     """Discover non-system collections containing an updated_at field."""
-    client = get_mongo_client()
-    try:
-        database = client[MONGO_DB]
-        discovered = []
-        for name in database.list_collection_names():
-            if not name.startswith("system.") and database[name].find_one({INCREMENTAL_COLUMN: {"$exists": True}}, {"_id": 1}):
-                discovered.append({"source": "mongo", "name": name, "primary_key": ["_id"]})
-        return discovered
-    finally:
-        client.close()
+    # PERF: client is now created once in main() and passed in, instead of
+    # this function opening (and closing) its own client every call.
+    database = client[MONGO_DB]
+    discovered = []
+    for name in database.list_collection_names():
+        if not name.startswith("system.") and database[name].find_one({INCREMENTAL_COLUMN: {"$exists": True}}, {"_id": 1}):
+            discovered.append({"source": "mongo", "name": name})
+    return discovered
 
 
 def validate_names(objects: list[dict]) -> None:
@@ -241,21 +209,17 @@ def get_databricks_row_count(databricks_conn, target_table: str) -> int:
         return int(row[0]) if row else 0
 
 
-def get_source_row_count(source: dict) -> int:
+def get_source_row_count(source: dict, postgres_engine, mongo_client) -> int:
     """Return the complete row/document count for the summary table."""
+    # PERF: this is called once per table (often from multiple threads at
+    # once). It used to open a brand-new engine/client and tear it down
+    # immediately after a single query - now it reuses the engine/client
+    # created once in main() (both are documented as thread-safe).
     if source["source"] == "postgres":
-        engine = get_postgres_engine()
-        try:
-            with engine.connect() as connection:
-                source_table = postgres_qualified_name(source["schema"], source["name"])
-                return int(connection.execute(text(f"SELECT COUNT(*) FROM {source_table}")).scalar_one())
-        finally:
-            engine.dispose()
-    client = get_mongo_client()
-    try:
-        return int(client[MONGO_DB][source["name"]].count_documents({}))
-    finally:
-        client.close()
+        with postgres_engine.connect() as connection:
+            source_table = postgres_qualified_name(source["schema"], source["name"])
+            return int(connection.execute(text(f"SELECT COUNT(*) FROM {source_table}")).scalar_one())
+    return int(mongo_client[MONGO_DB][source["name"]].count_documents({}))
 
 
 def postgres_literal(value) -> str:
@@ -269,28 +233,29 @@ def postgres_literal(value) -> str:
 
 
 def extract_postgres(spark: SparkSession, source: dict, watermark):
+    """Plain (unpartitioned) JDBC read of everything at/after the watermark.
+
+    No NTILE/key-ordered partitioning here: that existed purely to make
+    chunked MERGE commits resumable in primary-key-safe order. Bronze writes
+    are now a handful of plain INSERT batches with no target matching, so
+    there's nothing left that depends on read ordering. If a very large
+    table needs parallel reads, add back numPartitions/partitionColumn on a
+    numeric or date column.
+    """
     source_table = postgres_qualified_name(source["schema"], source["name"])
-    source_query = f"SELECT * FROM {source_table}"
+    query = f"SELECT * FROM {source_table}"
     if watermark is not None:
-        source_query = (
+        query = (
             f"SELECT * FROM {source_table} WHERE {quote_postgres_identifier(INCREMENTAL_COLUMN)} "
             f">= {postgres_literal(watermark)}"
         )
-    order_by = ", ".join(quote_postgres_identifier(column) for column in source["primary_key"])
-    query = f"""(
-        SELECT source_rows.*, NTILE({POSTGRES_READ_PARTITIONS}) OVER (ORDER BY {order_by}) - 1
-               AS {quote_postgres_identifier(POSTGRES_PARTITION_COLUMN)}
-        FROM ({source_query}) AS source_rows
-    ) AS partitioned_source"""
     jdbc_url = f"jdbc:postgresql://{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DATABASE}"
     return (
         spark.read.format("jdbc")
-        .option("url", jdbc_url).option("dbtable", query)
+        .option("url", jdbc_url).option("dbtable", f"({query}) AS source_rows")
         .option("user", POSTGRES_USERNAME).option("password", POSTGRES_PASSWORD)
         .option("driver", "org.postgresql.Driver").option("fetchsize", str(CHUNK_SIZE))
-        .option("partitionColumn", POSTGRES_PARTITION_COLUMN).option("lowerBound", "0")
-        .option("upperBound", str(POSTGRES_READ_PARTITIONS)).option("numPartitions", str(POSTGRES_READ_PARTITIONS))
-        .load().drop(POSTGRES_PARTITION_COLUMN)
+        .load()
     )
 
 
@@ -338,14 +303,19 @@ def ensure_target(databricks_conn, target_table: str, schema) -> None:
 
 def normalize_value(value):
     """Convert Spark Row/numpy values while retaining source structure and types."""
+    # PERF: plain scalars (str/int/float/bool/datetime/None/...) are the vast
+    # majority of leaf values processed here - this runs per cell, per row,
+    # for the whole chunk. Checking that fast path first (and returning
+    # immediately) avoids a hasattr()/isinstance() chain against
+    # Row/list/dict for every single scalar. Same results, just reordered.
+    if isinstance(value, (datetime, date, time, Decimal, bytes, str, int, float, bool)) or value is None:
+        return value
     if hasattr(value, "asDict"):
         return {key: normalize_value(item) for key, item in value.asDict(recursive=False).items()}
     if isinstance(value, list):
         return [normalize_value(item) for item in value]
     if isinstance(value, dict):
         return {key: normalize_value(item) for key, item in value.items()}
-    if isinstance(value, (datetime, date, time, Decimal, bytes, str, int, float, bool)) or value is None:
-        return value
     if hasattr(value, "item"):
         return value.item()
     return value
@@ -362,24 +332,22 @@ def rows_in_chunks(dataframe, chunk_size: int) -> Iterator[list[dict]]:
         yield batch
 
 
-def compute_merge_batch_size(column_count: int) -> int:
-    """Cap MERGE batches so (rows_in_batch * column_count) parameters never
+def compute_insert_batch_size(column_count: int) -> int:
+    """Cap INSERT batches so (rows_in_batch * column_count) parameters never
     exceed Databricks' Thrift server limit, regardless of how wide the table is.
     Tables with more columns get proportionally smaller batches.
     """
     if column_count <= 0:
         return CHUNK_SIZE
-    return max(1, min(CHUNK_SIZE, MAX_MERGE_PARAMETERS // column_count))
+    return max(1, min(CHUNK_SIZE, MAX_INSERT_PARAMETERS // column_count))
 
 
-def merge_rows(cursor, target_table: str, primary_key: list[str], records: list[dict]) -> None:
-    """Atomically upsert one chunk without creating a staging table.
+def insert_rows(cursor, target_table: str, records: list[dict]) -> None:
+    """Append one chunk as a single multi-row INSERT.
 
-    The source relation is built as a single VALUES(...) table constructor
-    rather than a UNION ALL of one SELECT per row. Functionally identical,
-    but Databricks' SQL analyzer only has to plan one relation instead of
-    reconciling the schema of N separately-planned SELECT branches, which is
-    what made batches of even a few thousand rows slow to compile.
+    No target read, no matching, no per-row loop, no update logic - this is
+    a pure append. Silver's dbt incremental models own de-duplication and
+    upserts from here on.
     """
     columns = list(records[0])
     column_list = ", ".join(quote_identifier(column) for column in columns)
@@ -392,61 +360,8 @@ def merge_rows(cursor, target_table: str, primary_key: list[str], records: list[
             markers.append(f":{marker}")
             parameters[marker] = record[column]
         value_rows.append("(" + ", ".join(markers) + ")")
-    join_condition = " AND ".join(
-        f"target.{quote_identifier(column)} = source.{quote_identifier(column)}" for column in primary_key
-    )
-    rows_match = " AND ".join(
-        f"target.{quote_identifier(column)} <=> source.{quote_identifier(column)}" for column in columns
-    )
-    sql = f"""
-        MERGE INTO {target_table} AS target
-        USING (
-            SELECT * FROM VALUES {', '.join(value_rows)} AS source({column_list})
-        ) AS source
-        ON {join_condition}
-        WHEN MATCHED AND NOT ({rows_match}) THEN UPDATE SET *
-        WHEN NOT MATCHED THEN INSERT *
-    """
+    sql = f"INSERT INTO {target_table} ({column_list}) VALUES {', '.join(value_rows)}"
     cursor.execute(sql, parameters)
-
-
-def coerce_metrics_to_dict(metrics) -> dict:
-    """Normalize a DESCRIBE HISTORY operationMetrics value into a plain dict.
-
-    The databricks-sql-connector does not deserialize MAP<STRING,STRING>
-    columns into a Python dict; depending on driver version it can hand back
-    a JSON string, or a list of ("key", "value") tuples / {"key":..,
-    "value":..} dicts. Calling .get() directly on that list is what produces
-    "'list' object has no attribute 'get'".
-    """
-    if isinstance(metrics, str):
-        return json.loads(metrics)
-    if isinstance(metrics, dict):
-        return metrics
-    if isinstance(metrics, list):
-        result = {}
-        for item in metrics:
-            if isinstance(item, dict) and "key" in item:
-                result[item["key"]] = item.get("value")
-            elif isinstance(item, (list, tuple)) and len(item) == 2:
-                result[item[0]] = item[1]
-        return result
-    return {}
-
-
-def latest_merge_metrics(cursor, target_table: str) -> tuple[int, int]:
-    """Read inserted and updated row counts from the most recent Delta MERGE."""
-    cursor.execute(f"DESCRIBE HISTORY {target_table} LIMIT 1")
-    row = cursor.fetchone()
-    columns = [description[0] for description in cursor.description]
-    if not row:
-        return 0, 0
-    history = dict(zip(columns, row))
-    raw_metrics = history.get("operationMetrics") or history.get("operationmetrics") or {}
-    metrics = coerce_metrics_to_dict(raw_metrics)
-    inserted = int(metrics.get("numTargetRowsInserted", 0))
-    updated = int(metrics.get("numTargetRowsUpdated", 0))
-    return inserted, updated
 
 
 def short_error(error: Exception, limit: int = 240) -> str:
@@ -464,36 +379,23 @@ def file_only_logger(stage: str, name: str):
     return logger
 
 
-def process_object(spark, databricks_conn, source: dict, logger, console: Console, progress: Progress) -> dict:
+def process_object(spark, databricks_conn, source: dict, logger, console: Console, progress: Progress,
+                    postgres_engine, mongo_client) -> dict:
     target = qualified_name(DATABRICKS_CATALOG, DATABRICKS_SCHEMA_BRONZE, source["name"])
     watermark = get_last_watermark(databricks_conn, target)
-    source_rows = get_source_row_count(source)
+    source_rows = get_source_row_count(source, postgres_engine, mongo_client)
     console.print(f"[cyan]Copying[/cyan] {source['source']}:{source['name']} (watermark: {watermark})")
     dataframe = extract_postgres(spark, source, watermark) if source["source"] == "postgres" else extract_mongo(spark, source, watermark)
-    # Process rows in updated_at order (not primary-key order) so that if a
-    # later chunk fails mid-table, everything already committed genuinely
-    # represents "safe up to here." Otherwise the next run's MAX(updated_at)
-    # watermark could land past rows that were never actually written,
-    # silently skipping them forever.
-    dataframe = dataframe.orderBy(INCREMENTAL_COLUMN)
     ensure_target(databricks_conn, target, dataframe.schema)
-    merge_batch_size = compute_merge_batch_size(len(dataframe.schema.fields))
-    scanned = inserted = updated = skipped = 0
+    insert_batch_size = compute_insert_batch_size(len(dataframe.schema.fields))
+    scanned = 0
     task = progress.add_task(f"Copying {source['name']}", total=None)
     with databricks_conn.cursor() as cursor:
-        for records in rows_in_chunks(dataframe, merge_batch_size):
-            merge_rows(cursor, target, source["primary_key"], records)
-            batch_inserted, batch_updated = latest_merge_metrics(cursor, target)
-            batch_skipped = len(records) - batch_inserted - batch_updated
+        for records in rows_in_chunks(dataframe, insert_batch_size):
+            insert_rows(cursor, target, records)
             scanned += len(records)
-            inserted += batch_inserted
-            updated += batch_updated
-            skipped += batch_skipped
             progress.update(task, advance=len(records))
-            logger.info(
-                "%s: processed=%s inserted=%s updated=%s skipped=%s",
-                source["name"], scanned, inserted, updated, skipped,
-            )
+            logger.info("%s: appended=%s", source["name"], scanned)
     progress.update(task, description=f"[green]Done[/green] {source['name']}")
     bronze_rows = get_databricks_row_count(databricks_conn, target)
     return {
@@ -501,14 +403,13 @@ def process_object(spark, databricks_conn, source: dict, logger, console: Consol
         "table": source["name"],
         "source_rows": source_rows,
         "bronze_rows": bronze_rows,
-        "inserted": inserted,
-        "updated": updated,
-        "skipped": skipped,
+        "appended": scanned,
         "status": "success" if scanned else "up to date",
     }
 
 
-def process_source_safely(spark, source: dict, logger, console: Console, progress: Progress) -> dict:
+def process_source_safely(spark, source: dict, logger, console: Console, progress: Progress,
+                           postgres_engine, mongo_client) -> dict:
     """Run one table's copy on its own Databricks connection.
 
     Connections/cursors from the databricks-sql-connector are not safe to
@@ -517,7 +418,8 @@ def process_source_safely(spark, source: dict, logger, console: Console, progres
     """
     try:
         with get_databricks_connection() as databricks_conn:
-            return process_object(spark, databricks_conn, source, logger, console, progress)
+            return process_object(spark, databricks_conn, source, logger, console, progress,
+                                   postgres_engine, mongo_client)
     except Exception as error:
         message = short_error(error)
         logger.error("%s failed: %s", source["name"], message)
@@ -530,9 +432,7 @@ def print_summary(console: Console, results: list[dict]) -> None:
     table.add_column("Table")
     table.add_column("Source rows", justify="right")
     table.add_column("Bronze rows", justify="right")
-    table.add_column("Inserted", justify="right", style="green")
-    table.add_column("Updated", justify="right", style="yellow")
-    table.add_column("Skipped", justify="right", style="dim")
+    table.add_column("Appended", justify="right", style="green")
     table.add_column("Status")
     for result in results:
         table.add_row(
@@ -540,32 +440,41 @@ def print_summary(console: Console, results: list[dict]) -> None:
             result["table"],
             f"{result.get('source_rows', 0):,}",
             f"{result.get('bronze_rows', 0):,}",
-            f"{result.get('inserted', 0):,}",
-            f"{result.get('updated', 0):,}",
-            f"{result.get('skipped', 0):,}",
+            f"{result.get('appended', 0):,}",
             result["status"],
         )
     console.print(table)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Discover and incrementally copy source data into Databricks bronze")
+    parser = argparse.ArgumentParser(description="Discover and append-only copy source data into Databricks bronze")
     parser.add_argument("--source", choices=("postgres", "mongo", "both"), default="both")
     args = parser.parse_args()
     console = Console()
-    console.print(Panel.fit("[bold cyan]Bronze Incremental Copy[/bold cyan]"))
+    console.print(Panel.fit("[bold cyan]Bronze Append-Only Load[/bold cyan]"))
     check_packages(console)
     spark = build_spark_session(check_jars(console))
     logger = file_only_logger("loading", "bronze_pipeline")
+    # PERF: one Postgres engine / Mongo client for the whole run, shared by
+    # discovery and by every table's row count (including concurrent ones
+    # in the thread pool below) instead of opening+closing a fresh
+    # connection pool per table. Both clients are thread-safe.
+    postgres_engine = None
+    mongo_client = None
     try:
-        sources = []
         if args.source in ("postgres", "both"):
-            sources.extend(discover_postgres())
+            postgres_engine = get_postgres_engine()
         if args.source in ("mongo", "both"):
-            sources.extend(discover_mongo())
+            mongo_client = get_mongo_client()
+
+        sources = []
+        if postgres_engine is not None:
+            sources.extend(discover_postgres(postgres_engine))
+        if mongo_client is not None:
+            sources.extend(discover_mongo(mongo_client))
         validate_names(sources)
         if not sources:
-            raise RuntimeError(f"No source objects with {INCREMENTAL_COLUMN} and a stable key were discovered")
+            raise RuntimeError(f"No source objects with an {INCREMENTAL_COLUMN} column were discovered")
         results = []
         progress_columns = (
             SpinnerColumn(),
@@ -577,7 +486,8 @@ def main() -> None:
         with Progress(*progress_columns, console=console, transient=True) as progress:
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 futures = [
-                    executor.submit(process_source_safely, spark, source, logger, console, progress)
+                    executor.submit(process_source_safely, spark, source, logger, console, progress,
+                                     postgres_engine, mongo_client)
                     for source in sources
                 ]
                 for future in as_completed(futures):
@@ -586,6 +496,10 @@ def main() -> None:
         print_summary(console, results)
     finally:
         spark.stop()
+        if postgres_engine is not None:
+            postgres_engine.dispose()
+        if mongo_client is not None:
+            mongo_client.close()
 
 
 if __name__ == "__main__":
