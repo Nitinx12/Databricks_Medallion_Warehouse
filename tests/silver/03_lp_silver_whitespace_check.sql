@@ -1,7 +1,5 @@
--- Loops every STRING column in silver and flags leading/trailing whitespace
--- that should have been stripped by TRIM() in the model. Catches cases
--- where a new source column was added but never wrapped in TRIM(). Returns
--- empty when clean.
+-- Checks all STRING columns in silver for leading or trailing whitespace.
+-- Detects columns missing TRIM() cleaning. Returns empty when clean.
 
 BEGIN
 
